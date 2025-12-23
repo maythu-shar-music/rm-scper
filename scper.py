@@ -58,7 +58,7 @@ Use the commands below to get started:
 async def scrape_messages(client, channel_username, limit, start_number=None, bank_name=None):
     messages = []
     count = 0
-    pattern = r'\d{15,16}\D*\d{2}\D*\d{2,4}\D*\d{3,4}'
+    pattern = r'\d{16}\D*\d{2}\D*\d{2,4}\D*\d{3,4}'
     bin_pattern = re.compile(r'^\d{6}') if start_number else None
 
     logger.info(f"Starting to scrape messages from {channel_username} with limit {limit}")
