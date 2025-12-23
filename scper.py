@@ -12,14 +12,14 @@ bot = Client(
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=3000,
+    workers=1000,
     parse_mode=ParseMode.HTML
 )
 
 user = Client(
     "user_session",
     session_string=SESSION_STRING,
-    workers=3000
+    workers=1000
 )
 
 scrape_queue = asyncio.Queue()
@@ -31,19 +31,17 @@ def remove_duplicates(messages):
 
 async def scrape_messages(client, channel_username, limit, start_number=None):
     messages = []
-    count = 0
-    # -----------------------------------------------------------
-    # EDITED FOR AMEX SUPPORT
-    # \d{15,16} allows both Amex (15) and Visa/MC (16)
-    # \d{1,2} allows months like '05' or '5'
-    # -----------------------------------------------------------
+    
+    # Regex Pattern: 
+    # - \d{15,16} : Support Amex (15) and Visa/Master (16)
+    # - \d{1,2}   : Support months like '05' or '5'
     pattern = r'\d{15,16}\D*\d{1,2}\D*\d{2,4}\D*\d{3,4}'
     
-    # Note: user.search_messages might not work as intended for pure history iteration without a query in some versions.
-    # If this loop doesn't return messages, consider switching to user.get_chat_history(channel_username)
-    async for message in user.search_messages(channel_username):
-        if count >= limit:
+    # Changed to get_chat_history to fix "Peer id invalid" error
+    async for message in client.get_chat_history(channel_username):
+        if len(messages) >= limit:
             break
+            
         text = message.text if message.text else message.caption
         if text:
             matched_messages = re.findall(pattern, text)
@@ -54,18 +52,17 @@ async def scrape_messages(client, channel_username, limit, start_number=None):
                     if len(extracted_values) == 4:
                         card_number, mo, year, cvv = extracted_values
                         
-                        # Basic Validation to ensure cleaner results
+                        # Filter to ensure valid Card Length and Month
                         if len(card_number) in [15, 16] and (1 <= int(mo) <= 12):
-                            year = year[-2:] # Get last 2 digits of year
-                            # Format nicely
+                            year = year[-2:] # Take last 2 digits of year
                             formatted_messages.append(f"{card_number}|{mo}|{year}|{cvv}")
                             
                 messages.extend(formatted_messages)
-                count += len(formatted_messages)
+                
     if start_number:
         messages = [msg for msg in messages if msg.startswith(start_number)]
-    messages = messages[:limit]
-    return messages
+    
+    return messages[:limit]
 
 @bot.on_message(filters.command(["scr"]))
 async def scr_cmd(client, message):
@@ -73,46 +70,69 @@ async def scr_cmd(client, message):
     if len(args) < 2 or len(args) > 3:
         await message.reply_text("<b>⚠️ Provide channel username and amount to scrape</b>")
         return
+        
     channel_identifier = args[0]
-    limit = int(args[1])
+    
+    try:
+        limit = int(args[1])
+    except ValueError:
+        await message.reply_text("<b>⚠️ Please enter a valid number for limit</b>")
+        return
+
     max_lim = ADMIN_LIMIT if message.from_user.id in ADMIN_IDS else DEFAULT_LIMIT
     if limit > max_lim:
         await message.reply_text(f"<b>Sorry Bro! Amount over Max limit is {max_lim} ❌</b>")
         return
+        
     start_number = args[2] if len(args) == 3 else None
+    
+    # Parse Username
     parsed_url = urlparse(channel_identifier)
     channel_username = parsed_url.path.lstrip('/') if not parsed_url.scheme else channel_identifier
+    
     try:
+        # Get Chat Info
         chat = await user.get_chat(channel_username)
         channel_name = chat.title
-    except Exception:
-        await message.reply_text("<b>Hey Bro! 🥲 Incorrect username ❌</b>")
+    except Exception as e:
+        await message.reply_text(f"<b>Hey Bro! 🥲 Incorrect username or User Banned ❌\nError: {e}</b>")
         return
+        
     temporary_msg = await message.reply_text("<b>Scraping in progress wait.....</b>")
-    scrapped_results = await scrape_messages(user, chat.id, limit, start_number)
-    unique_messages, duplicates_removed = remove_duplicates(scrapped_results)
-    if unique_messages:
-        file_name = f"x{len(unique_messages)}_{channel_name.replace(' ', '_')}.txt"
-        with open(file_name, 'w') as f:
-            f.write("\n".join(unique_messages))
-        with open(file_name, 'rb') as f:
-            caption = (
-                f"<b>CC Scrapped Successful ✅</b>\n"
-                f"<b>━━━━━━━━━━━━━━━━</b>\n"
-                f"<b>Source:</b> <code>{channel_name}</code>\n"
-                f"<b>Amount:</b> <code>{len(unique_messages)}</code>\n"
-                f"<b>Duplicates Removed:</b> <code>{duplicates_removed}</code>\n"
-                f"<b>━━━━━━━━━━━━━━━━</b>\n"
-                f"<b>Card-Scrapper By: <a href='https://t.me/iwillgoforwardsalone'>Dev</a></b>\n"
-            )
+    
+    try:
+        # Start Scraping using chat.id
+        scrapped_results = await scrape_messages(user, chat.id, limit, start_number)
+        
+        unique_messages, duplicates_removed = remove_duplicates(scrapped_results)
+        
+        if unique_messages:
+            file_name = f"x{len(unique_messages)}_{channel_name.replace(' ', '_')}.txt"
+            with open(file_name, 'w') as f:
+                f.write("\n".join(unique_messages))
+                
+            with open(file_name, 'rb') as f:
+                caption = (
+                    f"<b>CC Scrapped Successful ✅</b>\n"
+                    f"<b>━━━━━━━━━━━━━━━━</b>\n"
+                    f"<b>Source:</b> <code>{channel_name}</code>\n"
+                    f"<b>Amount:</b> <code>{len(unique_messages)}</code>\n"
+                    f"<b>Duplicates Removed:</b> <code>{duplicates_removed}</code>\n"
+                    f"<b>━━━━━━━━━━━━━━━━</b>\n"
+                    f"<b>Card-Scrapper By: <a href='https://t.me/iwillgoforwardsalone'>Dev</a></b>\n"
+                )
+                await temporary_msg.delete()
+                await client.send_document(message.chat.id, f, caption=caption)
+            os.remove(file_name)
+        else:
             await temporary_msg.delete()
-            await client.send_document(message.chat.id, f, caption=caption)
-        os.remove(file_name)
-    else:
+            await client.send_message(message.chat.id, "<b>Sorry Bro ❌ No Credit Card Found</b>")
+            
+    except Exception as e:
         await temporary_msg.delete()
-        await client.send_message(message.chat.id, "<b>Sorry Bro ❌ No Credit Card Found</b>")
+        await message.reply_text(f"<b>Error during scraping: {e}</b>")
 
 if __name__ == "__main__":
-    print("Bot Started...")
+    print("Bot Started Successfully...")
     user.start()
     bot.run()
