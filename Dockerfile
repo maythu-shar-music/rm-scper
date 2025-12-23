@@ -1,8 +1,20 @@
-FROM python:3.11-slim
+# Use the official Python 3.10 image from the Docker Hub
+FROM python:3.10-slim
+
+# Set the working directory in the container
 WORKDIR /app
 
-COPY requirements.txt .
+# Copy the requirements.txt file into the container at /app
+COPY requirements.txt /app/
+
+# Install any dependencies specified in requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
-COPY . .
-CMD ["python", "scper.py"]
+# Copy the rest of the working directory contents into the container at /app
+COPY . /app
+
+# Make start.sh executable
+RUN chmod +x start.sh
+
+# Run start.sh when the container launches
+CMD ["./start.sh"]
