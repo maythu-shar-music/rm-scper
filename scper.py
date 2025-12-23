@@ -11,13 +11,7 @@ from pyrogram.errors import (
     InviteHashExpired,
     InviteHashInvalid,
     PeerIdInvalid,
-    InviteRequestSent,
-    ChatAdminRequired,
-    FloodWait,
-    ChannelInvalid,
-    ChannelPrivate,
-    UsernameInvalid,
-    UsernameNotOccupied
+    InviteRequestSent
 )
 from urllib.parse import urlparse
 from config import (
@@ -30,27 +24,26 @@ from config import (
     DEFAULT_LIMIT
 )
 
-# Setup logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
+# Setup logging For Capturing Errors
+logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-# Initialize clients
+# Initialize Bot Client With Workers
 app = Client(
     "app_session",
     api_id=API_ID,
     api_hash=API_HASH,
     bot_token=BOT_TOKEN,
-    workers=200
+    workers=1000
 )
 
+# Initialize User Client With Workers
 user = Client(
     "user_session",
     session_string=SESSION_STRING,
-    workers=200
+    workers=1000
 )
+
 
 START_MESSAGE = """
 <b>Welcome to the Credit Card Scraper Bot 🕵️‍♂️💳</b>
@@ -58,104 +51,45 @@ START_MESSAGE = """
 I'm here to help you scrape credit card information from Telegram channels.
 Use the commands below to get started:
 
-<code>/scr [channel_username] [limit]</code> - Scrape from a single channel
-<code>/mc [channel1] [channel2] ... [limit]</code> - Scrape from multiple channels
-
-<b>Optional Filters:</b>
-• Add BIN number to filter by card BIN
-• Add bank name to filter by bank
-
-<b>Examples:</b>
-<code>/scr @channel 100</code>
-<code>/scr @channel 100 485898</code> (BIN filter)
-<code>/scr @channel 100 Chase</code> (Bank filter)
+/scr [channel_username] [limit] - Scrape from a single channel. 
 """
 
-# Compile regex patterns
-CC_PATTERN = re.compile(r'\b\d{15,16}\D*\d{2}\D*\d{2,4}\D*\d{3,4}\b')
-NUMBER_PATTERN = re.compile(r'\d+')
 
-async def safe_get_chat(client, identifier):
-    """Safely get chat information with proper error handling"""
-    try:
-        if isinstance(identifier, str) and identifier.startswith("https://t.me/+"):
-            # Handle private invite links
-            return await client.get_chat(identifier)
-        elif isinstance(identifier, str) and identifier.lstrip("-").isdigit():
-            # Handle numeric chat IDs
-            return await client.get_chat(int(identifier))
-        else:
-            # Handle usernames
-            return await client.get_chat(identifier)
-    except (PeerIdInvalid, ChannelInvalid, ChannelPrivate, UsernameInvalid, UsernameNotOccupied) as e:
-        logger.error(f"Failed to get chat {identifier}: {e}")
-        return None
-    except Exception as e:
-        logger.error(f"Unexpected error getting chat {identifier}: {e}")
-        return None
-
-async def scrape_messages(client, chat_id, limit, start_number=None, bank_name=None):
+async def scrape_messages(client, channel_username, limit, start_number=None, bank_name=None):
     messages = []
     count = 0
-    
-    try:
-        # First, verify we can access the chat
-        chat = await safe_get_chat(client, chat_id)
-        if not chat:
-            logger.error(f"Cannot access chat: {chat_id}")
-            return messages
-            
-        logger.info(f"Starting to scrape messages from {chat.title} with limit {limit}")
-        
-        async for message in client.search_messages(chat_id, limit=limit*5):  # Search more messages to find enough cards
-            if count >= limit:
-                break
-                
-            text = message.text or message.caption
-            if not text:
-                continue
-                
-            # Apply bank name filter
+    pattern = r'\d{15,16}\D*\d{2}\D*\d{2,4}\D*\d{3,4}'
+    bin_pattern = re.compile(r'^\d{6}') if start_number else None
+
+    logger.info(f"Starting to scrape messages from {channel_username} with limit {limit}")
+
+    # Fetch messages in batches
+    async for message in user.search_messages(channel_username):
+        if count >= limit:
+            break
+        text = message.text or message.caption
+        if text:
+            # Check if the bank name is mentioned in the message (case-insensitive)
             if bank_name and bank_name.lower() not in text.lower():
                 continue
-                
-            # Find CC matches
-            matches = CC_PATTERN.findall(text)
-            for match in matches:
-                if count >= limit:
-                    break
-                    
-                # Extract numbers
-                numbers = NUMBER_PATTERN.findall(match)
-                if len(numbers) == 4:
-                    card_number, month, year, cvv = numbers
-                    
-                    # Format year to 2 digits
-                    if len(year) == 4:
+            matched_messages = re.findall(pattern, text)
+            if matched_messages:
+                formatted_messages = []
+                for matched_message in matched_messages:
+                    extracted_values = re.findall(r'\d+', matched_message)
+                    if len(extracted_values) == 4:
+                        card_number, mo, year, cvv = extracted_values
                         year = year[-2:]
-                    elif len(year) == 2:
-                        pass  # Already 2 digits
-                    else:
-                        continue  # Invalid year format
-                        
-                    # Validate month
-                    if not (1 <= int(month) <= 12):
-                        continue
-                        
-                    # Apply BIN filter
-                    if start_number and not card_number.startswith(start_number[:6]):
-                        continue
-                        
-                    # Format and add to results
-                    formatted = f"{card_number}|{month}|{year}|{cvv}"
-                    if len(card_number) in [15, 16] and len(cvv) in [3, 4]:
-                        messages.append(formatted)
-                        count += 1
-                        
-    except Exception as e:
-        logger.error(f"Error scraping messages from {chat_id}: {e}")
-        
-    return messages
+                        # Apply BIN filter if start_number is provided
+                        if start_number:
+                            if card_number.startswith(start_number[:6]):
+                                formatted_messages.append(f"{card_number}|{mo}|{year}|{cvv}")
+                        else:
+                            formatted_messages.append(f"{card_number}|{mo}|{year}|{cvv}")
+                messages.extend(formatted_messages)
+                count += len(formatted_messages)
+    logger.info(f"Scraped {len(messages)} messages from {channel_username}")
+    return messages[:limit]
 
 def remove_duplicates(messages):
     unique_messages = list(set(messages))
@@ -165,11 +99,12 @@ def remove_duplicates(messages):
 
 async def send_results(client, message, unique_messages, duplicates_removed, source_name, bin_filter=None, bank_filter=None):
     if unique_messages:
-        file_name = f"x{len(unique_messages)}_{source_name.replace(' ', '_')[:50]}.txt"
-        
+        file_name = f"x{len(unique_messages)}_{source_name.replace(' ', '_')}.txt"
+        # Use aiofiles for asynchronous file writing
         async with aiofiles.open(file_name, mode='w') as f:
             await f.write("\n".join(unique_messages))
         
+        # Use aiofiles for asynchronous file reading
         async with aiofiles.open(file_name, mode='rb') as f:
             user_link = await get_user_link(message)
             caption = (
@@ -179,40 +114,29 @@ async def send_results(client, message, unique_messages, duplicates_removed, sou
                 f"<b>Amount:</b> <code>{len(unique_messages)} 📝</code>\n"
                 f"<b>Duplicates Removed:</b> <code>{duplicates_removed} 🗑️</code>\n"
             )
+            # Add BIN filter to caption if provided
             if bin_filter:
                 caption += f"<b>📝 BIN Filter:</b> <code>{bin_filter}</code>\n"
+            # Add Bank filter to caption if provided
             if bank_filter:
                 caption += f"<b>📝 Bank Filter:</b> <code>{bank_filter}</code>\n"
             caption += (
                 f"<b>━━━━━━━━━━━━━━━━</b>\n"
                 f"<b>✅ Card-Scrapped By: {user_link}</b>\n"
             )
-            
-            try:
-                await message.delete()
-                await client.send_document(
-                    message.chat.id,
-                    file_name,
-                    caption=caption,
-                    parse_mode=ParseMode.HTML
-                )
-            except Exception as e:
-                logger.error(f"Error sending results: {e}")
-                await message.reply_text("Failed to send results. Please try again.")
-        
-        # Cleanup
-        try:
-            os.remove(file_name)
-        except:
-            pass
+            await message.delete()
+            await client.send_document(message.chat.id, file_name, caption=caption)
+        os.remove(file_name)
+        logger.info(f"Results sent successfully for {source_name}")
     else:
         await message.edit_text("<b>Sorry Bro ❌ No Credit Card Found</b>")
+        logger.info("No credit cards found")
 
 async def get_user_link(message):
     if message.from_user is None:
         return '<a href="https://t.me/rmscrapperbot">Smart Tool</a>'
     else:
-        user_first_name = message.from_user.first_name or ""
+        user_first_name = message.from_user.first_name
         user_last_name = message.from_user.last_name or ""
         user_full_name = f"{user_first_name} {user_last_name}".strip()
         return f'<a href="tg://user?id={message.from_user.id}">{user_full_name}</a>'
@@ -228,183 +152,206 @@ async def join_private_chat(client, invite_link):
     except InviteRequestSent:
         logger.info(f"Join request sent to the chat: {invite_link}")
         return False
-    except (InviteHashExpired, InviteHashInvalid, PeerIdInvalid) as e:
+    except (InviteHashExpired, InviteHashInvalid) as e:
         logger.error(f"Failed to join chat {invite_link}: {e}")
         return False
 
-def setup_handlers(app):
+async def send_join_request(client, invite_link, message):
+    try:
+        await client.join_chat(invite_link)
+        logger.info(f"Sent join request to chat: {invite_link}")
+        return True
+    except PeerIdInvalid as e:
+        logger.error(f"Failed to send join request to chat {invite_link}: {e}")
+        return False
+    except InviteRequestSent:
+        logger.info(f"Join request sent to the chat: {invite_link}")
+        await message.edit_text("<b>Hey Bro I Have Sent Join Request✅</b>")
+        return False
+
+def setup_scr_handler(app):
     @app.on_message(filters.command(["scr", "ccscr", "scrcc"], prefixes=["/", ".", ",", "!"]) & (filters.group | filters.private))
     async def scr_cmd(client, message):
         args = message.text.split()[1:]
-        
+        user_id = message.from_user.id if message.from_user else None
+
         if len(args) < 2:
-            await message.reply_text(
-                "<b>⚠️ Provide channel username and amount to scrape ❌</b>\n\n"
-                "<b>Usage:</b> <code>/scr @channel 100</code>\n"
-                "<b>Optional:</b> Add BIN number or bank name for filtering"
-            )
+            await client.send_message(message.chat.id, "<b>⚠️ Provide channel username and amount to scrape ❌</b>")
+            logger.warning("Invalid command: Missing arguments")
             return
 
+        # Extract channel identifier (username, invite link, or chat ID)
         channel_identifier = args[0]
+        chat = None
+        channel_name = ""
+        channel_username = ""
+
+        # Handle private channel chat ID (numeric)
+        if channel_identifier.lstrip("-").isdigit():
+            # Treat it as a chat ID
+            chat_id = int(channel_identifier)
+            try:
+                # Fetch the chat details
+                chat = await user.get_chat(chat_id)
+                channel_name = chat.title
+                logger.info(f"Scraping from private channel: {channel_name} (ID: {chat_id})")
+            except Exception as e:
+                await client.send_message(message.chat.id, "<b>Hey Bro! 🥲 Invalid chat ID ❌</b>")
+                logger.error(f"Failed to fetch private channel: {e}")
+                return
+        else:
+            # Handle public channels or private invite links
+            if channel_identifier.startswith("https://t.me/+"):
+                # Private invite link
+                invite_link = channel_identifier
+                temporary_msg = await client.send_message(message.chat.id, "<b>Checking Username...</b>")
+                joined = await join_private_chat(user, invite_link)
+                if not joined:
+                    request_sent = await send_join_request(user, invite_link, temporary_msg)
+                    if not request_sent:
+                        return
+                else:
+                    await temporary_msg.delete()
+                    chat = await user.get_chat(invite_link)
+                    channel_name = chat.title
+                    logger.info(f"Joined private channel via link: {channel_name}")
+            elif channel_identifier.startswith("https://t.me/"):
+                # Remove "https://t.me/" for regular links
+                channel_username = channel_identifier[13:]
+            elif channel_identifier.startswith("t.me/"):
+                # Remove "t.me/" for short links
+                channel_username = channel_identifier[5:]
+            else:
+                # Assume it's already a username
+                channel_username = channel_identifier
+
+            if not chat:
+                try:
+                    # Fetch the chat details
+                    chat = await user.get_chat(channel_username)
+                    channel_name = chat.title
+                    logger.info(f"Scraping from public channel: {channel_name} (Username: {channel_username})")
+                except Exception as e:
+                    await client.send_message(message.chat.id, "<b>Hey Bro! 🥲 Incorrect username or chat ID ❌</b>")
+                    logger.error(f"Failed to fetch public channel: {e}")
+                    return
+
+        # Extract limit (second argument)
         try:
             limit = int(args[1])
+            logger.info(f"Scraping limit set to: {limit}")
         except ValueError:
-            await message.reply_text("<b>⚠️ Invalid limit value. Please provide a valid number ❌</b>")
+            await client.send_message(message.chat.id, "<b>⚠️ Invalid limit value. Please provide a valid number ❌</b>")
+            logger.warning("Invalid limit value provided")
             return
 
-        # Get user ID for limit check
-        user_id = message.from_user.id if message.from_user else None
-        max_lim = ADMIN_LIMIT if user_id in ADMIN_IDS else DEFAULT_LIMIT
-        
-        if limit > max_lim:
-            await message.reply_text(f"<b>Sorry Bro! Max limit is {max_lim} ❌</b>")
-            return
-
-        # Check optional filters
+        # Extract optional arguments (starting number or bank name)
         start_number = None
         bank_name = None
+        bin_filter = None
         if len(args) > 2:
+            # Check if the third argument is a starting number (digits only)
             if args[2].isdigit():
                 start_number = args[2]
-                if len(start_number) < 6:
-                    await message.reply_text("<b>⚠️ BIN filter must be at least 6 digits ❌</b>")
-                    return
+                bin_filter = args[2][:6]  # Extract first 6 digits as BIN filter
+                logger.info(f"BIN filter applied: {bin_filter}")
             else:
+                # Otherwise, treat it as a bank name
                 bank_name = " ".join(args[2:])
+                logger.info(f"Bank filter applied: {bank_name}")
 
-        # Send initial message
-        temp_msg = await message.reply_text("<b>Checking channel...</b>")
-        
-        try:
-            # Get chat info
-            chat = await safe_get_chat(user, channel_identifier)
-            if not chat:
-                await temp_msg.edit_text("<b>Hey Bro! 🥲 Invalid username/link or I don't have access ❌</b>")
-                return
-            
-            # Check if it's a private channel that needs joining
-            if hasattr(chat, 'invite_link') and chat.invite_link and not chat.username:
-                await temp_msg.edit_text("<b>Joining private channel...</b>")
-                joined = await join_private_chat(user, chat.invite_link)
-                if not joined:
-                    await temp_msg.edit_text("<b>Sent join request. Please approve and try again ✅</b>")
-                    return
-            
-            # Start scraping
-            await temp_msg.edit_text("<b>Scraping in progress... ⏳</b>")
-            scraped_messages = await scrape_messages(user, chat.id, limit, start_number, bank_name)
-            unique_messages, duplicates_removed = remove_duplicates(scraped_messages)
-            
-            if not unique_messages:
-                await temp_msg.edit_text("<b>Sorry Bro ❌ No Credit Card Found</b>")
-            else:
-                bin_filter = start_number[:6] if start_number else None
-                await send_results(
-                    client, 
-                    temp_msg, 
-                    unique_messages, 
-                    duplicates_removed, 
-                    chat.title, 
-                    bin_filter, 
-                    bank_name
-                )
-                
-        except FloodWait as e:
-            await temp_msg.edit_text(f"<b>⚠️ Flood wait: Please wait {e.value} seconds</b>")
-        except Exception as e:
-            logger.error(f"Error in scr_cmd: {e}")
-            await temp_msg.edit_text("<b>Error occurred. Please try again ❌</b>")
+        # Enforce maximum limit based on user role
+        max_lim = ADMIN_LIMIT if user_id in ADMIN_IDS else DEFAULT_LIMIT
+        if limit > max_lim:
+            await client.send_message(message.chat.id, f"<b>Sorry Bro! Amount over Max limit is {max_lim} ❌</b>")
+            logger.warning(f"Limit exceeded: {limit} > {max_lim}")
+            return
+
+        # Send a temporary message to check the username
+        temporary_msg = await client.send_message(message.chat.id, "<b>Checking The Username...</b>")
+        await asyncio.sleep(1.5)
+
+        # Start scraping
+        await temporary_msg.edit_text("<b>Scraping In Progress</b>")
+        scrapped_results = await scrape_messages(user, chat.id, limit, start_number=start_number, bank_name=bank_name)
+        unique_messages, duplicates_removed = remove_duplicates(scrapped_results)
+
+        if not unique_messages:
+            await temporary_msg.edit_text("<b>Sorry Bro ❌ No Credit Card Found</b>")
+        else:
+            await send_results(client, temporary_msg, unique_messages, duplicates_removed, channel_name, bin_filter=bin_filter, bank_filter=bank_name)
 
     @app.on_message(filters.command(["mc", "multiscr", "mscr"], prefixes=["/", ".", ",", "!"]) & (filters.group | filters.private))
     async def mc_cmd(client, message):
         args = message.text.split()[1:]
-        
         if len(args) < 2:
-            await message.reply_text(
-                "<b>⚠️ Provide at least one channel and limit</b>\n\n"
-                "<b>Usage:</b> <code>/mc @channel1 @channel2 100</code>"
-            )
+            await client.send_message(message.chat.id, "<b>⚠️ Provide at least one channel username</b>")
+            logger.warning("Invalid command: Missing arguments")
             return
 
-        # Last argument is the limit
-        try:
-            limit = int(args[-1])
-        except ValueError:
-            await message.reply_text("<b>⚠️ Invalid limit value. Please provide a valid number ❌</b>")
-            return
-
-        # Get user ID for limit check
-        user_id = message.from_user.id if message.from_user else None
-        max_lim = ADMIN_LIMIT if user_id in ADMIN_IDS else DEFAULT_LIMIT
-        
-        if limit > max_lim:
-            await message.reply_text(f"<b>Sorry Bro! Max limit is {max_lim} ❌</b>")
-            return
-
-        # Channel identifiers are all arguments except the last one
         channel_identifiers = args[:-1]
-        
-        temp_msg = await message.reply_text("<b>Starting multi-channel scrape... ⏳</b>")
+        limit = int(args[-1])
+        user_id = message.from_user.id if message.from_user else None
+
+        max_lim = ADMIN_LIMIT if user_id in ADMIN_IDS else DEFAULT_LIMIT
+        if limit > max_lim:
+            await client.send_message(message.chat.id, f"<b>Sorry Bro! Amount over Max limit is {max_lim} ❌</b>")
+            logger.warning(f"Limit exceeded: {limit} > {max_lim}")
+            return
+
+        temporary_msg = await client.send_message(message.chat.id, "<b>Scraping In Progress</b>")
         all_messages = []
-        
-        for idx, channel_identifier in enumerate(channel_identifiers):
-            try:
-                await temp_msg.edit_text(f"<b>Scraping channel {idx+1}/{len(channel_identifiers)}...</b>")
-                chat = await safe_get_chat(user, channel_identifier)
-                
-                if chat:
-                    messages = await scrape_messages(user, chat.id, limit // len(channel_identifiers))
-                    all_messages.extend(messages)
-                else:
-                    logger.warning(f"Could not access channel: {channel_identifier}")
-            except Exception as e:
-                logger.error(f"Error scraping {channel_identifier}: {e}")
-                continue
-        
+        tasks = []
+
+        for channel_identifier in channel_identifiers:
+            parsed_url = urlparse(channel_identifier)
+            channel_username = parsed_url.path.lstrip('/') if not parsed_url.scheme else channel_identifier
+
+            tasks.append(scrape_messages_task(user, channel_username, limit, client, message))
+
+        results = await asyncio.gather(*tasks)
+        for result in results:
+            all_messages.extend(result)
+
         unique_messages, duplicates_removed = remove_duplicates(all_messages)
         unique_messages = unique_messages[:limit]
-        
+
         if not unique_messages:
-            await temp_msg.edit_text("<b>Sorry Bro ❌ No Credit Card Found</b>")
+            await temporary_msg.edit_text("<b>Sorry Bro ❌ No Credit Card Found</b>")
         else:
-            await send_results(
-                client, 
-                temp_msg, 
-                unique_messages, 
-                duplicates_removed, 
-                f"{len(channel_identifiers)} Channels"
-            )
+            await send_results(client, temporary_msg, unique_messages, duplicates_removed, "Multiple Chats")
 
-    @app.on_message(filters.command("start", prefixes=["/", ".", ",", "!"]) & (filters.group | filters.private))
-    async def start(client, message):
-        buttons = [
-            [InlineKeyboardButton("Update Channel", url="https://t.me/everythingreset"), 
-             InlineKeyboardButton("Dev", user_id=1318826936)]
-        ]
-        await message.reply_text(
-            START_MESSAGE,
-            parse_mode=ParseMode.HTML,
-            disable_web_page_preview=True,
-            reply_markup=InlineKeyboardMarkup(buttons)
-        )
+async def scrape_messages_task(client, channel_username, limit, bot_client, message):
+    try:
+        chat = None
+        if channel_username.startswith("https://t.me/+"):
+            invite_link = channel_username
+            temporary_msg = await bot_client.send_message(message.chat.id, "<b>Checking Username...</b>")
+            joined = await join_private_chat(client, invite_link)
+            if not joined:
+                request_sent = await send_join_request(client, invite_link, temporary_msg)
+                if not request_sent:
+                    return []
+            else:
+                await temporary_msg.delete()
+                chat = await client.get_chat(invite_link)
+        else:
+            chat = await client.get_chat(channel_username)
 
-async def main():
-    # Start both clients
-    await user.start()
-    await app.start()
-    
-    # Set up handlers
-    setup_handlers(app)
-    
-    logger.info("Bot started successfully!")
-    
-    # Keep running
-    await asyncio.Event().wait()
+        return await scrape_messages(client, chat.id, limit)
+    except Exception as e:
+        await bot_client.send_message(message.chat.id, f"<b>Hey Bro! 🥲 Incorrect username for {channel_username} ❌</b>")
+        logger.error(f"Failed to scrape from {channel_username}: {e}")
+        return []
+
+@app.on_message(filters.command("start", prefixes=["/", ".", ",", "!"]) & (filters.group | filters.private))
+async def start(client, message):
+    buttons = [
+        [InlineKeyboardButton("Update Channel", url="https://t.me/everythingreset"), InlineKeyboardButton("Dev", user_id=1318826936)]
+    ]
+    await client.send_message(message.chat.id, START_MESSAGE, parse_mode=ParseMode.HTML, disable_web_page_preview=True, reply_markup=InlineKeyboardMarkup(buttons))
 
 if __name__ == "__main__":
-    try:
-        asyncio.run(main())
-    except KeyboardInterrupt:
-        logger.info("Bot stopped by user")
-    except Exception as e:
-        logger.error(f"Fatal error: {e}")
+    setup_scr_handler(app)
+    user.start()
+    app.run()
